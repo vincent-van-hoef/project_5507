@@ -6,8 +6,25 @@ library("ggplot2")
 library("cowplot")
 library("gridExtra")
 
+# Set working directory to script location (when sourcing...)
+#proj_dir <- dirname(sys.frame(1)$ofile)
+# or interactively
+proj_dir <- "/Users/vinva957/Desktop/NBIS/Projects/project_5507"
+setwd(proj_dir)
 
-# Load datasets
+# Load several custom functions
+# source("helpers.R")
+
+# Set up a report folder, remove existing one first
+res_dir <- paste0(proj_dir, "/Report/")
+unlink(res_dir, recursive = TRUE)
+dir.create(res_dir, showWarnings = FALSE)
+
+#############
+# Load Data #
+#############
+
+# Load datasets after the mapping pipeline for day1 and day24 separately and split into the different modalities
 d1 <- Read10X("/Users/vinva957/Desktop/NBIS/Projects/project_5507/data/day1_data/filtered_feature_bc_matrix/")
 d1_gene <- CreateSeuratObject(counts = d1$`Gene Expression`, project = "D1_Gene")
 d1_adt <- CreateSeuratObject(counts = d1$`Antibody Capture`, project = "D1_ADT")
@@ -16,9 +33,21 @@ d24 <- Read10X("/Users/vinva957/Desktop/NBIS/Projects/project_5507/data/day24_da
 d24_gene <- CreateSeuratObject(counts = d24$`Gene Expression`, project = "D24_Gene")
 d24_adt <- CreateSeuratObject(counts = d24$`Antibody Capture`, project = "D24_ADT")
 
+# Preprocess (qc, normalize, merge days, ...) each modality spearately, then integrate.
+
+#######
+# RNA #
+#######
+
+# Create a QC folder in the Report dir
+qc_rna_dir <- paste0(res_dir, "QC/RNA/")
+dir.create(qc_rna_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Calculate the mitochondrial gene percentage
 d1_gene[["percent.mt"]] <- PercentageFeatureSet(d1_gene, pattern = "^mt-")
 d24_gene[["percent.mt"]] <- PercentageFeatureSet(d24_gene, pattern = "^mt-")
 
+# Visualize the descriptive statistics
 p1 <- VlnPlot(d1_gene, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, combine = FALSE)
 for(i in 1:length(p1)) {
   p1[[i]] <- p1[[i]] + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + NoLegend()
@@ -28,28 +57,31 @@ p2 <- VlnPlot(d24_gene, features = c("nFeature_RNA", "nCount_RNA", "percent.mt")
 for(i in 1:length(p2)) {
   p2[[i]] <- p2[[i]] + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + NoLegend()
 }
-cowplot::plot_grid(plotlist = c(p1, p2), nrow = 2, labels = c("A", "", "", "B", "",""))
 
-# Filter
+pdf(paste0(qc_rna_dir, "Stats_day1_24.pdf"))
+cowplot::plot_grid(plotlist = c(p1, p2), nrow = 2, labels = c("A", "", "", "B", "",""))
+dev.off()
+
+# Filter to have between 200 and 4000 genes, less than 20000 molecules anda mito percentage less than 20%
 d1_gene <- subset(d1_gene, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & nCount_RNA < 20000 & percent.mt < 20)
 d24_gene <- subset(d24_gene, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & nCount_RNA < 20000  & percent.mt < 20)
 
-
+# Normalize the data using the logNormalize method
 d1_gene <- NormalizeData(d1_gene, normalization.method = "LogNormalize")
 d1_gene <- FindVariableFeatures(d1_gene, selection.method = "vst", nfeatures = 2000)
 
 d24_gene <- NormalizeData(d24_gene, normalization.method = "LogNormalize")
 d24_gene <- FindVariableFeatures(d24_gene, selection.method = "vst", nfeatures = 2000)
 
-
+# Merge the two days naively to show need for integration 
 pca.combo <- merge(d1_gene, y = d24_gene, add.cell.ids = c("d1", "d24"))
-
 # Run the standard workflow for visualization and clustering
 pca.combo <- FindVariableFeatures(pca.combo)
 pca.combo <- ScaleData(pca.combo, verbose = FALSE)
 pca.combo <- RunPCA(pca.combo, npcs = 30, verbose = FALSE, reduction.name = "comboPCA")
 pca.combo <- RunUMAP(pca.combo, reduction = "comboPCA", dims = 1:20)
 
+# More sophisticated integration
 rna.anchors <- FindIntegrationAnchors(object.list = list(d1_gene, d24_gene), dims = 1:20)
 gene.combined <- IntegrateData(anchorset = rna.anchors, dims = 1:20, new.assay.name = "integrated.RNA")
 
@@ -76,16 +108,29 @@ p2 <- DimPlot(gene.combined, reduction = "umap.RNA", group.by = "orig.ident") + 
   y.title = 6,
   main = NULL
 )
+pdf(paste0(qc_rna_dir, "Merging_vs_Integration_RNA.pdf"))
 plot_grid(p1, p2, ncol = 1, labels = c("A", "B"))
+dev.off()
 
+
+#######
+# ADT #
+#######
+
+# Create a QC folder in the Report dir
+qc_adt_dir <- paste0(res_dir, "QC/ADT/")
+dir.create(qc_adt_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Normalize the ADT data according to the CLR method
 d1_adt <- NormalizeData(d1_adt, normalization.method = "CLR", margin = 2)
 d24_adt <- NormalizeData(d24_adt, normalization.method = "CLR", margin = 2)
 
+# Run rest of workflow using all ADT as variable features
 features <- rownames(d1_adt)
-
+# Day 1
 d1_adt <- ScaleData(d1_adt, features = features)
 d1_adt <- RunPCA(d1_adt, features = features, verbose = FALSE, npcs = 10, nfeatures.print = 5, approx = FALSE)
-
+# Day 24
 d24_adt <- ScaleData(d24_adt, features = features)
 d24_adt <- RunPCA(d24_adt, features = features, verbose = FALSE, npcs = 10, nfeatures.print = 5, approx = FALSE)
 
@@ -102,7 +147,17 @@ adt.combined <- RunUMAP(adt.combined, dims = 1:9, reduction = "pca.ADT", reducti
 
 adt.combined <- adt.combined[,colnames(gene.combined)]
 
+pdf(paste0(qc_adt_dir, "Integrated_ADT.pdf"))
 DimPlot(adt.combined)
+dev.off()
+
+############
+# Integrate#
+############
+
+# Create a QC folder in the Report dir
+wnn_dir <- paste0(res_dir, "WNN_Integration/")
+dir.create(wnn_dir, showWarnings = FALSE, recursive = TRUE)
 
 all.combined <- gene.combined
 
@@ -124,9 +179,8 @@ all.combined <- FindMultiModalNeighbors(
 all.combined <- RunUMAP(all.combined, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
 all.combined <- FindClusters(all.combined, graph.name = "wsnn", algorithm = 3, resolution = 0.15, verbose = FALSE)
 
-pdf("6_Cluster_solution.pdf")
+pdf(paste0(wnn_dir, "6_Cluster_solution.pdf"))
 DimPlot(all.combined, reduction = 'wnn.umap', group.by = "orig.ident")
-print(p1)
 dev.off()
 
 # Basophils: c-kit- CD11b+ integrin B7 lo/negative
