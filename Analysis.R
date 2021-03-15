@@ -16,3 +16,156 @@ d24 <- Read10X("/Users/vinva957/Desktop/NBIS/Projects/project_5507/data/day24_da
 d24_gene <- CreateSeuratObject(counts = d24$`Gene Expression`, project = "D24_Gene")
 d24_adt <- CreateSeuratObject(counts = d24$`Antibody Capture`, project = "D24_ADT")
 
+d1_gene[["percent.mt"]] <- PercentageFeatureSet(d1_gene, pattern = "^mt-")
+d24_gene[["percent.mt"]] <- PercentageFeatureSet(d24_gene, pattern = "^mt-")
+
+p1 <- VlnPlot(d1_gene, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, combine = FALSE)
+for(i in 1:length(p1)) {
+  p1[[i]] <- p1[[i]] + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + NoLegend()
+}
+
+p2 <- VlnPlot(d24_gene, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, combine = FALSE)
+for(i in 1:length(p2)) {
+  p2[[i]] <- p2[[i]] + theme(axis.title.x = element_blank(), axis.text.x = element_blank()) + NoLegend()
+}
+cowplot::plot_grid(plotlist = c(p1, p2), nrow = 2, labels = c("A", "", "", "B", "",""))
+
+# Filter
+d1_gene <- subset(d1_gene, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & nCount_RNA < 20000 & percent.mt < 20)
+d24_gene <- subset(d24_gene, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & nCount_RNA < 20000  & percent.mt < 20)
+
+
+d1_gene <- NormalizeData(d1_gene, normalization.method = "LogNormalize")
+d1_gene <- FindVariableFeatures(d1_gene, selection.method = "vst", nfeatures = 2000)
+
+d24_gene <- NormalizeData(d24_gene, normalization.method = "LogNormalize")
+d24_gene <- FindVariableFeatures(d24_gene, selection.method = "vst", nfeatures = 2000)
+
+
+pca.combo <- merge(d1_gene, y = d24_gene, add.cell.ids = c("d1", "d24"))
+
+# Run the standard workflow for visualization and clustering
+pca.combo <- FindVariableFeatures(pca.combo)
+pca.combo <- ScaleData(pca.combo, verbose = FALSE)
+pca.combo <- RunPCA(pca.combo, npcs = 30, verbose = FALSE, reduction.name = "comboPCA")
+pca.combo <- RunUMAP(pca.combo, reduction = "comboPCA", dims = 1:20)
+
+rna.anchors <- FindIntegrationAnchors(object.list = list(d1_gene, d24_gene), dims = 1:20)
+gene.combined <- IntegrateData(anchorset = rna.anchors, dims = 1:20, new.assay.name = "integrated.RNA")
+
+DefaultAssay(gene.combined) <- "integrated.RNA"
+
+# Run the standard workflow for visualization and clustering
+gene.combined <- ScaleData(gene.combined, verbose = FALSE)
+gene.combined <- RunPCA(gene.combined, npcs = 30, verbose = FALSE, reduction.name = "pca.RNA")
+# t-SNE and Clustering
+gene.combined <- RunUMAP(gene.combined, reduction = "pca.RNA", dims = 1:20, reduction.name = "umap.RNA")
+
+# Visualization
+p1 <- DimPlot(pca.combo, reduction = "umap", group.by = "orig.ident") + ggtitle("") + NoLegend() +FontSize(
+  x.text = 6,
+  y.text = 6,
+  x.title = 6,
+  y.title = 6,
+  main = NULL
+)
+p2 <- DimPlot(gene.combined, reduction = "umap.RNA", group.by = "orig.ident") + ggtitle("") + theme(legend.position = "bottom")  +FontSize(
+  x.text = 6,
+  y.text = 6,
+  x.title = 6,
+  y.title = 6,
+  main = NULL
+)
+plot_grid(p1, p2, ncol = 1, labels = c("A", "B"))
+
+d1_adt <- NormalizeData(d1_adt, normalization.method = "CLR", margin = 2)
+d24_adt <- NormalizeData(d24_adt, normalization.method = "CLR", margin = 2)
+
+features <- rownames(d1_adt)
+
+d1_adt <- ScaleData(d1_adt, features = features)
+d1_adt <- RunPCA(d1_adt, features = features, verbose = FALSE, npcs = 10, nfeatures.print = 5, approx = FALSE)
+
+d24_adt <- ScaleData(d24_adt, features = features)
+d24_adt <- RunPCA(d24_adt, features = features, verbose = FALSE, npcs = 10, nfeatures.print = 5, approx = FALSE)
+
+anchors <- FindIntegrationAnchors(object.list = list(d1_adt, d24_adt), 
+                                  anchor.features = features, 
+                                  scale = FALSE,
+                                  normalization.method = "LogNormalize",
+                                  reduction = "rpca",
+                                  dims = 1:9)
+adt.combined <- IntegrateData(anchorset = anchors, new.assay.name = "integrated.ADT", dims = 1:9)
+adt.combined <- ScaleData(adt.combined, verbose = FALSE, features = features)
+adt.combined <- RunPCA(adt.combined, verbose = FALSE, reduction.name = "pca.ADT")
+adt.combined <- RunUMAP(adt.combined, dims = 1:9, reduction = "pca.ADT", reduction.name = "umap.ADT")
+
+adt.combined <- adt.combined[,colnames(gene.combined)]
+
+DimPlot(adt.combined)
+
+all.combined <- gene.combined
+
+all.combined[["integrated.ADT"]] <- adt.combined[["integrated.ADT"]]
+all.combined[["pca.ADT"]] <- adt.combined[["pca.ADT"]]
+all.combined[["umap.ADT"]] <- adt.combined[["umap.ADT"]]
+
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using bm[['weighted.nn']]
+# The WNN graph can be accessed at bm[["wknn"]], 
+# and the SNN graph used for clustering at bm[["wsnn"]]
+# Cell-specific modality weights can be accessed at bm$RNA.weight
+all.combined <- FindMultiModalNeighbors(
+  all.combined, 
+  reduction.list = list("pca.RNA", "pca.ADT"), 
+  dims.list = list(1:30, 1:9), 
+  modality.weight.name = "RNA.weight")
+
+all.combined <- RunUMAP(all.combined, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+all.combined <- FindClusters(all.combined, graph.name = "wsnn", algorithm = 3, resolution = 0.15, verbose = FALSE)
+
+pdf("6_Cluster_solution.pdf")
+DimPlot(all.combined, reduction = 'wnn.umap', group.by = "orig.ident")
+print(p1)
+dev.off()
+
+# Basophils: c-kit- CD11b+ integrin B7 lo/negative
+# Protein
+marker_features <-  c("Itgb7","Cd34","Il10rb","Fcgr1","Cd44","P2rx7","Fcgr3","Kit","Itgam", "Itgae")  
+names(marker_features) <- features
+plotList <- list()
+for (adt in names(marker_features)){
+  DefaultAssay(all.combined) <- "integrated.ADT"
+  p1 <- FeaturePlot(all.combined, reduction = "wnn.umap", features = adt, label=TRUE)
+  p2 <- VlnPlot(all.combined, features = adt)
+  DefaultAssay(all.combined) <- "integrated.RNA"
+  p3 <- FeaturePlot(all.combined, reduction = "wnn.umap", features = marker_features[adt], label=TRUE)
+  p4 <- VlnPlot(all.combined, features = marker_features[adt])
+  plotList[[adt]] <- list(p1,p2, p3, p4)
+}
+pdf("Draft_Clustering.pdf", onefile=TRUE)
+for(i in 1:length(marker_features)){
+  grid.arrange(plot_grid(plotlist = plotList[[i]], nrow=2))
+} 
+dev.off()
+
+
+marker_features <-  c("Tpsb2","Cpa3","Mcpt4","Mcpt1","Srgn","Hpgds","Mcpt8","Il3ra")  
+plotList <- list()
+for (marker in marker_features){
+  DefaultAssay(all.combined) <- "integrated.RNA"
+  p1 <- FeaturePlot(all.combined, reduction = "wnn.umap", features = marker, label=TRUE)
+  p2 <- VlnPlot(all.combined, features = marker)
+  plotList[[marker]] <- list(p1,p2)
+}
+pdf("Draft_Clustering_v2.pdf", onefile = TRUE)
+for(i in c(1,3,5,7)){
+  grid.arrange(
+    plot_grid(plotlist = plotList[[i]], nrow=1),
+    plot_grid(plotlist = plotList[[i+1]], nrow=1))
+} 
+dev.off()
+
+
+
+
