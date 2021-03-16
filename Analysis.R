@@ -5,6 +5,7 @@ library("dplyr")
 library("ggplot2")
 library("cowplot")
 library("gridExtra")
+library("patchwork")
 
 # Set working directory to script location (when sourcing...)
 #proj_dir <- dirname(sys.frame(1)$ofile)
@@ -156,7 +157,7 @@ dev.off()
 ############
 
 # Create a QC folder in the Report dir
-wnn_dir <- paste0(res_dir, "WNN_Integration/")
+wnn_dir <- paste0(res_dir, "Clustering/")
 dir.create(wnn_dir, showWarnings = FALSE, recursive = TRUE)
 
 all.combined <- gene.combined
@@ -175,13 +176,44 @@ all.combined <- FindMultiModalNeighbors(
   reduction.list = list("pca.RNA", "pca.ADT"), 
   dims.list = list(1:30, 1:9), 
   modality.weight.name = "RNA.weight")
-
 all.combined <- RunUMAP(all.combined, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
-all.combined <- FindClusters(all.combined, graph.name = "wsnn", algorithm = 3, resolution = 0.15, verbose = FALSE)
 
-pdf(paste0(wnn_dir, "6_Cluster_solution.pdf"))
-DimPlot(all.combined, reduction = 'wnn.umap', group.by = "orig.ident")
-dev.off()
+resolutions <- c(0.05,0.15,0.25,0.5,1,2)
+
+for(resolution in resolutions){
+  
+  # Create a folder for each resolution
+  resol_dir <- paste0(wnn_dir, "Resolution_", gsub("\\.", "_", resolution), "/")
+  dir.create(resol_dir, showWarnings = FALSE, recursive = TRUE)
+    
+  all.combined <- FindClusters(all.combined, graph.name = "wsnn", algorithm = 3, resolution = resolution, verbose = FALSE)
+
+  pdf(paste0(resol_dir, "Clustering.pdf"))
+  p1 <- DimPlot(all.combined, reduction = 'wnn.umap', group.by = paste0("wsnn_res.", resolution)) + 
+    plot_annotation(title = paste0("Resolution_", gsub("\\.","_", resolution)))
+  print(p1)
+  dev.off()
+  
+  marker_features <-  c("Itgb7","Cd34","Il10rb","Fcgr1","Cd44","P2rx7","Fcgr3","Kit","Itgam", "Itgae")  
+  names(marker_features) <- features
+  plotList <- list()
+  for (adt in names(marker_features)){
+    DefaultAssay(all.combined) <- "integrated.ADT"
+    p1 <- FeaturePlot(all.combined, reduction = "wnn.umap", features = adt, label=TRUE)
+    p2 <- VlnPlot(all.combined, features = adt)
+    DefaultAssay(all.combined) <- "integrated.RNA"
+    p3 <- FeaturePlot(all.combined, reduction = "wnn.umap", features = marker_features[adt], label=TRUE)
+    p4 <- VlnPlot(all.combined, features = marker_features[adt])
+    plotList[[adt]] <- list(p1,p2, p3, p4)
+  }
+  pdf("Draft_Clustering.pdf", onefile=TRUE)
+  for(i in 1:length(marker_features)){
+    grid.arrange(plot_grid(plotlist = plotList[[i]], nrow=2))
+  } 
+}
+
+
+
 
 # Basophils: c-kit- CD11b+ integrin B7 lo/negative
 # Protein
